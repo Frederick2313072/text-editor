@@ -1,8 +1,12 @@
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+#define _GNU_SOURCE
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <termios.h>
 #include <stdlib.h>
@@ -22,11 +26,18 @@ enum editorKey
   PAGE_UP,
   PAGE_DOWN
 };
+typedef struct erow
+{
+  int size;
+  char *chars;
+} erow; // 编辑行
 struct editorConfig
 {
   int cx, cy;
   int screenrows;
   int screencols;
+  int numrows;
+  erow row;
   struct termios orig_termios;
 };
 struct editorConfig E;
@@ -178,6 +189,31 @@ int getWindowSize(int *rows, int *cols)
     return 0;
   }
 }
+/*** file i/o ***/
+void editorOpen(char *filename)
+{
+  FILE *fp = fopen(filename, "r");
+  if (!fp)
+    die("fopen");
+  char *line = NULL;
+  size_t linecap = 0;
+  ssize_t linelen;
+  linelen = getline(&line, &linecap, fp); // 在我们不知道为每行分配多少内存时，用于从文件中读取行。它为您处理内存管理。首先，我们传递给它一个空 line 指针和一个 linecap （行容量）的 0 。这使得它为读取的下一行分配新的内存，并将 line 设置为指向内存，并将 linecap 设置为让您知道它分配了多少内存。它的返回值是它读取的行的长度，或者 -1 如果它位于文件末尾且没有更多行可读。稍后，当我们已经 editorOpen() 读取了文件的多个行时，我们将能够将新的 line 和 linecap 值反复放回 getline() 中，并且它将尝试重用 line 指向的内存，只要 linecap 足够大以容纳它读取的下一行。
+  if (linelen != -1)
+  {
+    while (linelen > 0 && (line[linelen - 1] == '\n' ||
+                           line[linelen - 1] == '\r'))
+      linelen--;
+
+    E.row.size = linelen;
+    E.row.chars = malloc(linelen + 1); // 只需将读取的一行复制到E.row.chars中
+    memcpy(E.row.chars, line, linelen);
+    E.row.chars[linelen] = '\0';
+    E.numrows = 1;
+  }
+  free(line);
+  fclose(fp);
+}
 /*** append buffer ***/
 struct abuf
 {
@@ -270,26 +306,36 @@ void editorDrawRows(struct abuf *ab)
   int y;
   for (y = 0; y < E.screenrows; y++)
   {
-    if (y == E.screenrows / 3)
+    if (y >= E.numrows) // 检查是否正在绘制属于文本缓冲区的行，或者是否正在绘制文本缓冲区结束后的行
     {
-      char welcome[80];
-      int welcomelen = snprintf(welcome, sizeof(welcome),
-                                "Kilo editor -- version %s", KILO_VERSION); // 欢迎信息
-      if (welcomelen > E.screencols)
-        welcomelen = E.screencols;
-      int padding = (E.screencols - welcomelen) / 2; // 居中
-      if (padding)
+      if (E.numrows == 0 && y == E.screenrows / 3) // 待定，欢迎信息仅在用户不带参数启动程序时显示，而不是在打开文件时显示，以为欢迎信息可能会妨碍文件显示
       {
-        abAppend(ab, "~", 1);
-        padding--;
+        char welcome[80];
+        int welcomelen = snprintf(welcome, sizeof(welcome),
+                                  "Kilo editor -- version %s", KILO_VERSION); // 欢迎信息
+        if (welcomelen > E.screencols)
+          welcomelen = E.screencols;
+        int padding = (E.screencols - welcomelen) / 2; // 居中
+        if (padding)
+        {
+          abAppend(ab, "~", 1);
+          padding--;
+        }
+        while (padding--)
+          abAppend(ab, " ", 1);
+        abAppend(ab, welcome, welcomelen);
       }
-      while (padding--)
-        abAppend(ab, " ", 1);
-      abAppend(ab, welcome, welcomelen);
     }
     else
     {
       abAppend(ab, "~", 1);
+    }
+    else
+    { // 确保不会超出屏幕的末尾
+      int len = E.row.size;
+      if (len > E, screencols)
+        len = E.screencols;
+      abAppend(ab, E.row.chars, len);
     }
     abAppend(ab, "\x1b[K", 3); // K逐行删除
     if (y < E.screenrows - 1)
@@ -317,14 +363,20 @@ void editorRefreshScreen()
 void initEditor()
 {
   E.cx = 0; // 光标水平，列
-  E.cy = 0; // 光标垂直。行
+  E.cy = 0; // 光标垂直，行
+  E.numrows = 0;
+
   if (getWindowSize(&E.screenrows, &E.screencols) == -1)
     die("getWindowSize");
 }
-int main()
+int main(int argc, char *argv[])
 {
   enableRawMode();
   initEditor(); // 初始化E结构体中的所有字段
+  if (argc >= 2)
+  {
+    editorOpen(argv[1]);
+  }
   while (1)
   {
     editorRefreshScreen();
