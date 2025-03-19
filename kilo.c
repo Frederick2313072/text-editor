@@ -7,8 +7,10 @@
 #include <termios.h>
 #include <stdlib.h>
 /*** defines ***/
+#define KILO_VERSION "0.0.1"
 #define CTRL_KEY(k) ((k) & 0x1f)
 struct editorConfig{
+  int cx,cy;
   int screenrows;
   int screencols;
   struct termios orig_termios;
@@ -25,16 +27,16 @@ void disableRawMode(){
 	  die("tcsetattr");
 }
 void enableRawMode(){
-  if(tcgetattr(STDIN_FILENO,&E.orig_termios)==-1)die("tcgetattr");
+  if(tcgetattr(STDIN_FILENO,&E.orig_termios)==-1) die("tcgetattr");
   struct termios raw=E.orig_termios;
-  tcgetattr(STDIN_FILENO,&orig_termios);//使用tcgetattr()将当前属性读入一个结构体中
+  //使用tcgetattr()将当前属性读入一个结构体中
   atexit(disableRawMode);//注册disableRawMode()函数，通过调用exit()函数，确保程序退出时，中断属性保持我们找到它们
   raw.c_iflag &=~(BRKINT|ICRNL|INPCK|ISTRIP|IXON);//IXON关闭ctrl s/q，前者用于软件流控制，后者组织数据传输到中断,ICRNL关闭终端将用户输入的任何回车符转换为换行符，BRKINT开启时，一个终端条件将导致向程序发送一个SIGINT信号，就像按下ctrl-c键，INPCK启用奇偶检验，似乎不适用于现代终端仿真器，ISTRIP会导致每个输入字节的第8位被移除
   raw.c_oflag &=~(OPOST);//关闭OPOST标志来关闭所有输出处理功能
   raw.c_cflag |=(CS8);//掩码，将字符大小（CS）设置为梅子姐8位
   raw.c_lflag &=~(ECHO|ICANON| IEXTEN| ISIG);//将修改后的结构体传递给tcsetarr()以新的中断属性协会,关闭规范模式，诸子皆读取输入,ISIG关闭两个信号，SIGINT和SIGTSTP导致终止和挂起，ctrl c/z
   raw.c_cc[VMIN]=0;
-  raw.c_cc[VTIME]=1;
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1)raw.c_cc[VTIME]=1;
   if(tcsetattr(STDIN_FILENO,TCSAFLUSH,&raw)== -1) die("tcsetattr");//一个让tcgetattr()是啊比的简单方法是将程序的标准输入设置为文本文件或管道而不是终端，尝试echo test | ./kilo
 }
 /*** terminal ***/
@@ -80,7 +82,7 @@ struct abuf{
   int len;
 };
 
-#define ABUF_INIT{NULL,0}
+#define ABUF_INIT {NULL, 0}
 
 void abAppend(struct abuf *ab,const char *s,int len){
   char *new = realloc(ab->b,ab->len+len);//请求realloc()给我们一块内存，大小位当前字符串的大小加上要追加的字符串大小
@@ -107,21 +109,45 @@ void editorProcessKeypress() {//等待按键，将把各种ctrl键组合和其�
 void editorDrawRows(struct abuf *ab){
   int y;
   for(y=0;y<E.screenrows;y++){
-    abAppend(as,"~",1);
-    
+    if (y == E.screenrows / 3) {
+      char welcome[80];
+      int welcomelen = snprintf(welcome, sizeof(welcome),
+        "Kilo editor -- version %s", KILO_VERSION);//欢迎信息
+      if (welcomelen > E.screencols) welcomelen = E.screencols;
+      int padding = (E.screencols - welcomelen) / 2;//居中
+      if (padding) {
+        abAppend(ab, "~", 1);
+        padding--;
+      }
+      while (padding--) abAppend(ab, " ", 1);
+      abAppend(ab, welcome, welcomelen);
+    } else {   
+    abAppend(ab,"~",1);
+    }
+    abAppend(ab, "\x1b[K", 3);//K逐行删除
     if(y<E.screenrows-1){
       abAppend(ab,"\r\n",2);//最后一行不打印""\r\n
     }
   }
 }
 void editorRefreshScreen(){//清屏
-  
-  write(STDOUT_FILENO,"\x1b[2J",4);// \x1b是住哪一字符,J命令清楚屏幕，参数是2，表示清楚整个屏幕，<esc>[1J 将清除屏幕到光标处，而 <esc>[0J 将清除从光标到屏幕末尾的屏幕。此外， 0 是 J 的默认参数，因此仅使用 <esc>[J 本身也会清除从光标到屏幕末尾的屏幕。
-  write(STDOUT_FILENO,"\x1b[H",3);//重新定位光标到屏幕左上角
-  editorDrawRows();
-  write(STDOUT_FILENO,"\x1b[H",3);//绘制完成后，重新定位光标到屏幕左上角
+  struct abuf ab = ABUF_INIT;//初始化一个新的abuf，称为ab，替换所有WRITE为abAppend 
+  abAppend(&ab, "\x1b[?25l", 6);//重置模式
+  // \x1b是住哪一字符,J命令清楚屏幕，参数是2，表示清楚整个屏幕，<esc>[1J 将清除屏幕到光标处，而 <esc>[0J 将清除从光标到屏幕末尾的屏幕。此外， 0 是 J 的默认参数，因此仅使用 <esc>[J 本身也会清除从光标到屏幕末尾的屏幕。
+  abAppend(&ab,"\x1b[H",3);//重新定位光标到屏幕左上角
+  editorDrawRows(&ab);
+
+  char buf[32];
+  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+  abAppend(&ab, buf, strlen(buf));
+  abAppend(&ab,"\x1b[H",3);//绘制完成后，重新定位光标到屏幕左上角
+  abAppend(&ab, "\x1b[?25h", 6);//设置模式
+  write(STDOUT_FILENO, ab.b, ab.len);
+  abFree(&ab);
 }
 void initEditor(){
+ E.cx = 0;//光标水平，列
+ E.cy = 0;//光标垂直。行
  if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
 }
 int main(){
@@ -133,4 +159,4 @@ int main(){
    }
 
     return 0;
-i}
+}
