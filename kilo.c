@@ -9,6 +9,13 @@
 /*** defines ***/
 #define KILO_VERSION "0.0.1"
 #define CTRL_KEY(k) ((k) & 0x1f)
+
+enum editorKey {
+  ARROW_LEFT = 'a',
+  ARROW_RIGHT = 'd',
+  ARROW_UP = 'w',
+  ARROW_DOWN = 's'
+};
 struct editorConfig{
   int cx,cy;
   int screenrows;
@@ -46,7 +53,22 @@ char editorReadKey() {//等待一个按键操作，并返回它，涉及读取�
   while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
     if (nread == -1 && errno != EAGAIN) die("read");
   }
-  return c;
+  if (c == '\x1b') {//如果我们读取到一个转义字符，我们立即将两个额外的字节读入 seq 缓冲区。如果其中任何一个读取超时（0.1 秒后），那么我们假设用户只是按下了 Escape 键，并返回该键。否则，我们查看该转义序列是否是一个箭头键转义序列。如果是，我们只需返回相应的 w a s d 字符即可。如果不是我们认识的转义序列，我们只需返回转义字符。
+    char seq[3];
+    if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+    if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+    if (seq[0] == '[') {
+      switch (seq[1]) {
+        case 'A': return ARROW_UP;
+        case 'B': return ARROW_DOWN;
+        case 'C': return ARROW_RIGHT;
+        case 'D': return ARROW_LEFT;
+      }
+    }
+    return '\x1b';
+  } else {
+    return c;
+  }
 }
 
 int getCursorPosition(int *rows, int *cols) {//获取光标位置，n查询终端的状态信息
@@ -96,6 +118,22 @@ void abFree(struct abuf *ab){//释放由abuf使用的动态内存
   free(ab->b);
 }
 /*** input ***/
+void editorMoveCursor(char key) {
+  switch (key) {
+    case ARROW_LEFT:
+      E.cx--;
+      break;
+    case ARROW_RIGHT:
+      E.cx++;
+      break;
+    case ARROW_UP:
+      E.cy--;
+      break;
+    case ARROW_DOWN:
+      E.cy++;
+      break;
+  }
+}
 void editorProcessKeypress() {//等待按键，将把各种ctrl键组合和其他特殊键映射到不同的编辑器功能，并将任何字母数字和其他可打印键的字符插入到正在编辑的文本中
   char c = editorReadKey();
   switch (c) {
@@ -103,6 +141,13 @@ void editorProcessKeypress() {//等待按键，将把各种ctrl键组合和其�
       write(STDOUT_FILENO, "\x1b[2J", 4);
       write(STDOUT_FILENO, "\x1b[H", 3);
       exit(0);
+      break;
+
+    case ARROW_UP:
+    case ARROW_DOWN:
+    case ARROW_LEFT:
+    case ARROW_RIGHT:
+      editorMoveCursor(c);
       break;
   }
 }
