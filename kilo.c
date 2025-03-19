@@ -139,7 +139,6 @@ else
 {
   return c;
 }
-}
 
 int getCursorPosition(int *rows, int *cols)
 { // 获取光标位置，n查询终端的状态信息
