@@ -4,12 +4,13 @@
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
-#include <unistd.h>
 #include <termios.h>
-#include <stdlib.h>
+#include <unistd.h>
+
 /*** defines ***/
 #define KILO_VERSION "0.0.1"
 #define CTRL_KEY(k) ((k) & 0x1f)
@@ -41,6 +42,7 @@ struct editorConfig
   struct termios orig_termios;
 };
 struct editorConfig E;
+/*** terminal ***/
 void die(const char *s)
 {
   write(STDOUT_FILENO, "\x1b[2J", 4);
@@ -65,12 +67,10 @@ void enableRawMode()
   raw.c_cflag |= (CS8);                                     // 掩码，将字符大小（CS）设置为梅子姐8位
   raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);          // 将修改后的结构体传递给tcsetarr()以新的中断属性协会,关闭规范模式，诸子皆读取输入,ISIG关闭两个信号，SIGINT和SIGTSTP导致终止和挂起，ctrl c/z
   raw.c_cc[VMIN] = 0;
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1)
-    raw.c_cc[VTIME] = 1;
+  raw.c_cc[VTIME] = 1;
   if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
     die("tcsetattr"); // 一个让tcgetattr()是啊比的简单方法是将程序的标准输入设置为文本文件或管道而不是终端，尝试echo test | ./kilo
 }
-/*** terminal ***/
 int editorReadKey()
 { // 等待一个按键操作，并返回它，涉及读取表示单个按键操作的多字节
   int nread;
@@ -180,7 +180,6 @@ int getWindowSize(int *rows, int *cols)
     if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12)
       return -1;
     return getCursorPosition(rows, cols); // ioctl()将终端的列数和行数放入指定的winsize结构体中，没有简单的将光标移动到右下角的命令
-    return -1;
   }
   else
   {
@@ -192,7 +191,7 @@ int getWindowSize(int *rows, int *cols)
 /*** row operations ***/
 void editorAppendRow(char *s, size_t len)
 {
-  E.row = realloc(E.row, sizeof(erow) * E.numrows + 1); // 重新分配内存以容纳新行
+  E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1)); // 重新分配内存以容纳新行
   int at = E.numrows;
   E.row[at].size = len;              // 将新行插入到行数组的末尾
   E.row[at].chars = malloc(len + 1); // 为新行分配内存
@@ -241,6 +240,66 @@ void abAppend(struct abuf *ab, const char *s, int len)
 void abFree(struct abuf *ab)
 { // 释放由abuf使用的动态内存
   free(ab->b);
+}
+/*** output ***/
+void editorDrawRows(struct abuf *ab)
+{
+  int y;
+  for (y = 0; y < E.screenrows; y++)
+  {
+    if (y >= E.numrows) // 检查是否正在绘制属于文本缓冲区的行，或者是否正在绘制文本缓冲区结束后的行
+    {
+      if (E.numrows == 0 && y == E.screenrows / 3) // 待定，欢迎信息仅在用户不带参数启动程序时显示，而不是在打开文件时显示，以为欢迎信息可能会妨碍文件显示
+      {
+        char welcome[80];
+        int welcomelen = snprintf(welcome, sizeof(welcome),
+                                  "Kilo editor -- version %s", KILO_VERSION); // 欢迎信息
+        if (welcomelen > E.screencols)
+          welcomelen = E.screencols;
+        int padding = (E.screencols - welcomelen) / 2; // 居中
+        if (padding)
+        {
+          abAppend(ab, "~", 1);
+          padding--;
+        }
+        while (padding--)
+          abAppend(ab, " ", 1);
+        abAppend(ab, welcome, welcomelen);
+      }
+      else
+      {
+        abAppend(ab, "~", 1);
+      }
+    }
+    else
+    { // 确保不会超出屏幕的末尾
+      int len = E.row[y].size;
+      if (len > E.screencols)
+        len = E.screencols;
+      abAppend(ab, E.row[y].chars, len);
+    }
+    abAppend(ab, "\x1b[K", 3); // K逐行删除
+    if (y < E.screenrows - 1)
+    {
+      abAppend(ab, "\r\n", 2); // 最后一行不打印""\r\n
+    }
+  }
+}
+void editorRefreshScreen()
+{                                // 清屏
+  struct abuf ab = ABUF_INIT;    // 初始化一个新的abuf，称为ab，替换所有WRITE为abAppend
+  abAppend(&ab, "\x1b[?25l", 6); // 重置模式
+  // \x1b是住哪一字符,J命令清楚屏幕，参数是2，表示清楚整个屏幕，<esc>[1J 将清除屏幕到光标处，而 <esc>[0J 将清除从光标到屏幕末尾的屏幕。此外， 0 是 J 的默认参数，因此仅使用 <esc>[J 本身也会清除从光标到屏幕末尾的屏幕。
+  abAppend(&ab, "\x1b[H", 3); // 重新定位光标到屏幕左上角
+  editorDrawRows(&ab);
+
+  char buf[32];
+  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+  abAppend(&ab, buf, strlen(buf));
+  abAppend(&ab, "\x1b[H", 3);    // 绘制完成后，重新定位光标到屏幕左上角
+  abAppend(&ab, "\x1b[?25h", 6); // 设置模式
+  write(STDOUT_FILENO, ab.b, ab.len);
+  abFree(&ab);
 }
 /*** input ***/
 void editorMoveCursor(int key)
@@ -306,65 +365,7 @@ void editorProcessKeypress()
     break;
   }
 }
-void editorDrawRows(struct abuf *ab)
-{
-  int y;
-  for (y = 0; y < E.screenrows; y++)
-  {
-    if (y >= E.numrows) // 检查是否正在绘制属于文本缓冲区的行，或者是否正在绘制文本缓冲区结束后的行
-    {
-      if (E.numrows == 0 && y == E.screenrows / 3) // 待定，欢迎信息仅在用户不带参数启动程序时显示，而不是在打开文件时显示，以为欢迎信息可能会妨碍文件显示
-      {
-        char welcome[80];
-        int welcomelen = snprintf(welcome, sizeof(welcome),
-                                  "Kilo editor -- version %s", KILO_VERSION); // 欢迎信息
-        if (welcomelen > E.screencols)
-          welcomelen = E.screencols;
-        int padding = (E.screencols - welcomelen) / 2; // 居中
-        if (padding)
-        {
-          abAppend(ab, "~", 1);
-          padding--;
-        }
-        while (padding--)
-          abAppend(ab, " ", 1);
-        abAppend(ab, welcome, welcomelen);
-      }
-      else
-      {
-        abAppend(ab, "~", 1);
-      }
-    }
-    else
-    { // 确保不会超出屏幕的末尾
-      int len = E.row[y].size;
-      if (len > E.screencols)
-        len = E.screencols;
-      abAppend(ab, E.row[y].chars, len);
-    }
-    abAppend(ab, "\x1b[K", 3); // K逐行删除
-    if (y < E.screenrows - 1)
-    {
-      abAppend(ab, "\r\n", 2); // 最后一行不打印""\r\n
-    }
-  }
-}
-void editorRefreshScreen()
-{                                // 清屏
-  struct abuf ab = ABUF_INIT;    // 初始化一个新的abuf，称为ab，替换所有WRITE为abAppend
-  abAppend(&ab, "\x1b[?25l", 6); // 重置模式
-  // \x1b是住哪一字符,J命令清楚屏幕，参数是2，表示清楚整个屏幕，<esc>[1J 将清除屏幕到光标处，而 <esc>[0J 将清除从光标到屏幕末尾的屏幕。此外， 0 是 J 的默认参数，因此仅使用 <esc>[J 本身也会清除从光标到屏幕末尾的屏幕。
-  abAppend(&ab, "\x1b[H", 3); // 重新定位光标到屏幕左上角
-  editorDrawRows(&ab);
 
-  char buf[32];
-  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
-  abAppend(&ab, buf, strlen(buf));
-  abAppend(&ab, "\x1b[H", 3);    // 绘制完成后，重新定位光标到屏幕左上角
-  abAppend(&ab, "\x1b[?25h", 6); // 设置模式
-  write(STDOUT_FILENO, ab.b, ab.len);
-  abFree(&ab);
-}
 void initEditor()
 {
   E.cx = 0; // 光标水平，列
