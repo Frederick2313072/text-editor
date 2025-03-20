@@ -330,15 +330,15 @@ void editorDrawRows(struct abuf *ab)
           abAppend(ab, " ", 1);
         abAppend(ab, welcome, welcomelen);
       }
-    }
-    else
-    {
-      abAppend(ab, "~", 1);
+      else
+      {
+        abAppend(ab, "~", 1);
+      }
     }
     else
     { // 确保不会超出屏幕的末尾
       int len = E.row[y].size;
-      if (len > E, screencols)
+      if (len > E.screencols)
         len = E.screencols;
       abAppend(ab, E.row[y].chars, len);
     }
