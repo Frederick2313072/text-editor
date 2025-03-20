@@ -37,7 +37,7 @@ struct editorConfig
   int screenrows;
   int screencols;
   int numrows;
-  erow row;
+  erow *row;
   struct termios orig_termios;
 };
 struct editorConfig E;
@@ -189,6 +189,17 @@ int getWindowSize(int *rows, int *cols)
     return 0;
   }
 }
+/*** row operations ***/
+void editorAppendRow(char *s, size_t len)
+{
+  E.row = realloc(E.row, sizeof(erow) * E.numrows + 1); // 重新分配内存以容纳新行
+  int at = E.numrows;
+  E.row[at].size = len;              // 将新行插入到行数组的末尾
+  E.row[at].chars = malloc(len + 1); // 为新行分配内存
+  memcpy(E.row[at].chars, s, len);   // 将新行复制到新分配的内存中
+  E.row[at].chars[len] = '\0';
+  E.numrows++;
+}
 /*** file i/o ***/
 void editorOpen(char *filename)
 {
@@ -198,18 +209,12 @@ void editorOpen(char *filename)
   char *line = NULL;
   size_t linecap = 0;
   ssize_t linelen;
-  linelen = getline(&line, &linecap, fp); // 在我们不知道为每行分配多少内存时，用于从文件中读取行。它为您处理内存管理。首先，我们传递给它一个空 line 指针和一个 linecap （行容量）的 0 。这使得它为读取的下一行分配新的内存，并将 line 设置为指向内存，并将 linecap 设置为让您知道它分配了多少内存。它的返回值是它读取的行的长度，或者 -1 如果它位于文件末尾且没有更多行可读。稍后，当我们已经 editorOpen() 读取了文件的多个行时，我们将能够将新的 line 和 linecap 值反复放回 getline() 中，并且它将尝试重用 line 指向的内存，只要 linecap 足够大以容纳它读取的下一行。
-  if (linelen != -1)
-  {
+  while ((linelen = getline(&line, &linecap, fp)) != -1)
+  { // 将整个文件读取到E.row中
     while (linelen > 0 && (line[linelen - 1] == '\n' ||
                            line[linelen - 1] == '\r'))
       linelen--;
-
-    E.row.size = linelen;
-    E.row.chars = malloc(linelen + 1); // 只需将读取的一行复制到E.row.chars中
-    memcpy(E.row.chars, line, linelen);
-    E.row.chars[linelen] = '\0';
-    E.numrows = 1;
+    editorAppendRow(line, linelen);
   }
   free(line);
   fclose(fp);
@@ -332,10 +337,10 @@ void editorDrawRows(struct abuf *ab)
     }
     else
     { // 确保不会超出屏幕的末尾
-      int len = E.row.size;
+      int len = E.row[y].size;
       if (len > E, screencols)
         len = E.screencols;
-      abAppend(ab, E.row.chars, len);
+      abAppend(ab, E.row[y].chars, len);
     }
     abAppend(ab, "\x1b[K", 3); // K逐行删除
     if (y < E.screenrows - 1)
@@ -365,6 +370,7 @@ void initEditor()
   E.cx = 0; // 光标水平，列
   E.cy = 0; // 光标垂直，行
   E.numrows = 0;
+  E.row = NULL;
 
   if (getWindowSize(&E.screenrows, &E.screencols) == -1)
     die("getWindowSize");
